@@ -243,18 +243,18 @@ class Decoder(srd.Decoder):
     elif cmd0 == 0xBA:
       self.maybe_close_26()
       o = ' '.join(['{:02X}'.format(m.val) for m in miso[1:]])
-      self.put(miso[0].ss, miso[-1].es, self.out_ann, [self.ann_read, ['Read buffer: ' + o]])
+      self.put(miso[0].ss, miso[-1].es, self.out_ann, [self.ann_read, ['Read buffer: ' + o, 'RdBuf']])
     elif cmd0 == 0xBC:
       self.maybe_close_26()
       o = ' '.join(['{:02X}'.format(m.val) for m in mosi[1:]])
-      self.put(mosi[0].ss, mosi[-1].es, self.out_ann, [self.ann_write, ['Write buffer' + o]])
+      self.put(mosi[0].ss, mosi[-1].es, self.out_ann, [self.ann_write, ['Write buffer: ' + o, 'WrBuf']])
     elif cmd0 == 0xEE:
       self.maybe_close_26()
       if txn_length == 5:
         o = '{:c}{:c}{:c}{:c}'.format(miso[1].val, miso[2].val, miso[3].val, miso[4].val)
       else:
         o = ' '.join(['{:02X}'.format(m.val) for m in miso[1:]])
-      self.put(miso[0].ss, miso[4].es, self.out_ann, [self.ann_read, ['FPGA Id: ' + o, 'ID:' + o]])
+      self.put(miso[0].ss, miso[4].es, self.out_ann, [self.ann_read, ['FPGA Id: ' + o, 'ID:' + o, 'Id']])
     else:
       self.maybe_close_26()
       self.put(start_sample, end_sample, self.out_ann, [self.ann_garbage, ['Unrecognized command', '???']])
