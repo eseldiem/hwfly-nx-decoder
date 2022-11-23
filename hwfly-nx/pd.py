@@ -37,7 +37,8 @@ class Decoder(srd.Decoder):
     ('Commands', 'Commands', (ann_read, ann_write, ann_payload, ann_response, ann_garbage)),
   )
   options = (
-    {'id': 'merge_flag_reads', 'desc': 'Merge flag read and response into single annotation', 'default': 'no', 'values': ('yes', 'no')},
+    {'id': 'merge_flag_reads', 'desc': 'Merge flag read and response into a single annotation', 'default': 'yes', 'values': ('yes', 'no')},
+    {'id': 'merge_same_flag_annots', 'desc': 'Merge same flag annotations into a single annotation', 'default': 'yes', 'values': ('yes', 'no')},
   )
 
   def __init__(self):
@@ -45,10 +46,11 @@ class Decoder(srd.Decoder):
 
   def reset(self):
     self.requirements_met = True
+    self.current_flags = None
+    self.current_timer = None
 
   def start(self):
     self.out_ann = self.register(srd.OUTPUT_ANN)
-    pass
 
   def command_24_6(self, mosi, miso):
     start_sample = min(miso[0].ss, mosi[0].ss)
@@ -113,6 +115,38 @@ class Decoder(srd.Decoder):
     else:
       self.put(start_sample, end_sample, self.out_ann, [self.ann_garbage, ['Unrecognized 0x24 command']])
 
+  def maybe_close_26(self):
+    if self.current_flags or self.current_timer:
+      ss = None
+      es = None
+      out = []
+      if self.current_flags:
+        if ss:
+          ss = min(self.current_flags[0], ss)
+        else:
+          ss = self.current_flags[0]
+        if es:
+          es = max(self.current_flags[1], es)
+        else:
+          es = self.current_flags[1]
+        out.append(self.current_flags[2])
+      if self.current_timer:
+        if ss:
+          ss = min(self.current_timer[0], ss)
+        else:
+          ss = self.current_timer[0]
+        if es:
+          es = max(self.current_timer[1], es)
+        else:
+          es = self.current_timer[1]
+        out.append(self.current_timer[2])
+      self.put(ss, es, self.out_ann, [self.ann_read, [', '.join(out)]])
+      self.current_flags = None
+      self.current_timer = None
+    else:
+      return
+    
+
   def command_26(self, mosi, miso):
     start_sample = min(miso[0].ss, mosi[0].ss)
     end_sample = max(mosi[-1].es, miso[-1].es)
@@ -120,11 +154,22 @@ class Decoder(srd.Decoder):
         
     cmd1 = mosi[1].val
     if cmd1 == 0xA:
-      if self.options['merge_flag_reads'] == 'no':
+      if self.options['merge_flag_reads'] == 'no' and self.options['merge_same_flag_annots'] == 'no':
         self.put(mosi[0].ss, mosi[1].es, self.out_ann, [self.ann_read, ['Read glitch timer']])
         self.put(miso[2].ss, miso[2].es, self.out_ann, [self.ann_response, ['{:d}'.format(miso[2].val)]])
       else:
-        self.put(mosi[0].ss, miso[2].es, self.out_ann, [self.ann_read, ['Read glitch timer: {:d}'.format(miso[2].val)]])
+        if self.options['merge_same_flag_annots'] == 'yes':
+          d = 'Read glitch timer: {:d}'.format(miso[2].val)
+          if self.current_timer:
+            if self.current_timer[2] == d:
+              self.current_timer[1] = miso[2].es
+            else:
+              self.maybe_close_26()
+              self.current_timer = [mosi[0].ss, miso[2].es, d]
+          else:
+            self.current_timer = [mosi[0].ss, miso[2].es, d]
+        else:
+          self.put(mosi[0].ss, miso[2].es, self.out_ann, [self.ann_read, ['Read glitch timer: {:d}'.format(miso[2].val)]])
     elif cmd1 == 0xB:
       b = miso[2].val
       out = []
@@ -146,11 +191,22 @@ class Decoder(srd.Decoder):
         out.append('UNKNOWN2')
       if len(out) == 0:
         out.append('NONE')
-      if self.options['merge_flag_reads'] == 'no':
+      if self.options['merge_flag_reads'] == 'no' and self.options['merge_same_flag_annots'] == 'no':
         self.put(mosi[0].ss, mosi[1].es, self.out_ann, [self.ann_read, ['Read eMMC flags']])
         self.put(miso[2].ss, miso[2].es, self.out_ann, [self.ann_response, [', '.join(out)]])
       else:
-        self.put(mosi[0].ss, miso[2].es, self.out_ann, [self.ann_read, ['Read eMMC flags: ' + ', '.join(out)]])
+        if self.options['merge_same_flag_annots'] == 'yes':
+          d = 'Read eMMC flags: ' + ', '.join(out)
+          if self.current_flags:
+            if self.current_flags[2] == d:
+              self.current_flags[1] = miso[2].es
+            else:
+              self.maybe_close_26()
+              self.current_flags = [mosi[0].ss, miso[2].es, d]
+          else:
+            self.current_flags = [mosi[0].ss, miso[2].es, d]
+        else:
+          self.put(mosi[0].ss, miso[2].es, self.out_ann, [self.ann_read, ['Read eMMC flags: ' + ', '.join(out)]])
     else:
       self.put(start_sample, end_sample, self.out_ann, [self.ann_garbage, ['Unrecognized 0x26 command']])
 
@@ -164,6 +220,7 @@ class Decoder(srd.Decoder):
 
     cmd0 = mosi[0].val
     if cmd0 == 0x24:
+      self.maybe_close_26()
       if txn_length >= 3:
         self.command_24(mosi, miso)
       else:
@@ -172,23 +229,32 @@ class Decoder(srd.Decoder):
       if txn_length >= 3:
         self.command_26(mosi, miso)
       else:
+        self.maybe_close_26()
         self.put(start_sample, end_sample, self.out_ann, [self.ann_garbage, ['Unrecognized (too short?)']])
     elif cmd0 == 0x54:
+      self.maybe_close_26()
       self.put(miso[0].ss, miso[0].es, self.out_ann, [self.ann_write, ['Do eMMC command']])
     elif cmd0 == 0xBA:
+      self.maybe_close_26()
       self.put(mosi[0].ss, mosi[0].es, self.out_ann, [self.ann_read, ['Read buffer']])
       self.put(miso[1].ss, miso[-1].es, self.out_ann, [self.ann_response, [' '.join(['{:02X}'.format(m.val) for m in miso[1:]])]])
     elif cmd0 == 0xBC:
+      self.maybe_close_26()
       self.put(mosi[0].ss, mosi[0].es, self.out_ann, [self.ann_read, ['Write buffer']])
       self.put(mosi[1].ss, mosi[-1].es, self.out_ann, [self.ann_response, [' '.join(['{:02X}'.format(m.val) for m in mosi[1:]])]])
     elif cmd0 == 0xEE:
+      self.maybe_close_26()
       self.put(mosi[0].ss, mosi[0].es, self.out_ann, [self.ann_read, ['Read FPGA id']])
       if txn_length == 5:
         self.put(miso[1].ss, miso[4].es, self.out_ann, [self.ann_response, ['{:c}{:c}{:c}{:c}'.format(miso[1].val, miso[2].val, miso[3].val, miso[4].val)]])
       else:
         self.put(miso[1].ss, miso[-1].es, self.out_ann, [self.ann_response, [' '.join(['{:02X}'.format(m.val) for m in miso[1:]])]])
     else:
+      self.maybe_close_26()
       self.put(start_sample, end_sample, self.out_ann, [self.ann_garbage, ['Unrecognized command']])
+
+  def end(self):
+    self.maybe_close_26()
 
   def decode(self, ss, es, data):
     if not self.requirements_met:
